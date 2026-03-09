@@ -35,6 +35,7 @@ import { readNativeApi } from "../nativeApi";
 import { type DraftThreadEnvMode, useComposerDraftStore } from "../composerDraftStore";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { toastManager } from "./ui/toast";
+import { commitThreadRename } from "../lib/threadRename";
 import {
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
@@ -556,6 +557,12 @@ export default function Sidebar() {
     renamingInputRef.current = null;
   }, []);
 
+  const startRename = useCallback((threadId: ThreadId, title: string) => {
+    setRenamingThreadId(threadId);
+    setRenamingTitle(title);
+    renamingCommittedRef.current = false;
+  }, []);
+
   const commitRename = useCallback(
     async (threadId: ThreadId, newTitle: string, originalTitle: string) => {
       const finishRename = () => {
@@ -566,35 +573,11 @@ export default function Sidebar() {
         });
       };
 
-      const trimmed = newTitle.trim();
-      if (trimmed.length === 0) {
-        toastManager.add({ type: "warning", title: "Thread title cannot be empty" });
-        finishRename();
-        return;
-      }
-      if (trimmed === originalTitle) {
-        finishRename();
-        return;
-      }
-      const api = readNativeApi();
-      if (!api) {
-        finishRename();
-        return;
-      }
-      try {
-        await api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId,
-          title: trimmed,
-        });
-      } catch (error) {
-        toastManager.add({
-          type: "error",
-          title: "Failed to rename thread",
-          description: error instanceof Error ? error.message : "An error occurred.",
-        });
-      }
+      await commitThreadRename({
+        threadId,
+        nextTitle: newTitle,
+        originalTitle,
+      });
       finishRename();
     },
     [],
@@ -617,9 +600,7 @@ export default function Sidebar() {
       if (!thread) return;
 
       if (clicked === "rename") {
-        setRenamingThreadId(threadId);
-        setRenamingTitle(thread.title);
-        renamingCommittedRef.current = false;
+        startRename(threadId, thread.title);
         return;
       }
 
@@ -750,6 +731,7 @@ export default function Sidebar() {
       projects,
       removeWorktreeMutation,
       routeThreadId,
+      startRename,
       threads,
     ],
   );
@@ -1314,9 +1296,28 @@ export default function Sidebar() {
                                       onClick={(e) => e.stopPropagation()}
                                     />
                                   ) : (
-                                    <span className="min-w-0 flex-1 truncate text-xs">
+                                    <button
+                                      type="button"
+                                      className="min-w-0 flex-1 truncate bg-transparent p-0 text-left text-xs outline-hidden"
+                                      title={thread.title}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        if (event.detail === 2) {
+                                          return;
+                                        }
+                                        void navigate({
+                                          to: "/$threadId",
+                                          params: { threadId: thread.id },
+                                        });
+                                      }}
+                                      onDoubleClick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        startRename(thread.id, thread.title);
+                                      }}
+                                    >
                                       {thread.title}
-                                    </span>
+                                    </button>
                                   )}
                                 </div>
                                 <div className="ml-auto flex shrink-0 items-center gap-1.5">

@@ -256,6 +256,32 @@ function createDraftOnlySnapshot(): OrchestrationReadModel {
   };
 }
 
+function createSnapshotWithSecondaryThread(): OrchestrationReadModel {
+  const snapshot = createSnapshotForTargetUser({
+    targetMessageId: "msg-user-secondary-target" as MessageId,
+    targetText: "secondary thread",
+  });
+  const primaryThread = snapshot.threads[0];
+  if (!primaryThread) {
+    throw new Error("Expected a primary thread in the browser test snapshot.");
+  }
+  return {
+    ...snapshot,
+    threads: [
+      primaryThread,
+      {
+        ...primaryThread,
+        id: "thread-secondary" as ThreadId,
+        title: "Secondary thread",
+        createdAt: isoAt(600),
+        updatedAt: isoAt(600),
+        session: null,
+        messages: [],
+      },
+    ],
+  };
+}
+
 function resolveWsRpc(tag: string): unknown {
   if (tag === ORCHESTRATION_WS_METHODS.getSnapshot) {
     return fixture.snapshot;
@@ -407,6 +433,93 @@ async function waitForInteractionModeButton(expectedLabel: "Chat" | "Plan"): Pro
       ) as HTMLButtonElement | null,
     `Unable to find ${expectedLabel} interaction mode button.`,
   );
+}
+
+async function waitForHeaderTitleButton(title: string): Promise<HTMLButtonElement> {
+  return waitForElement(
+    () =>
+      Array.from(document.querySelectorAll("header button")).find(
+        (button) => button.getAttribute("title") === title,
+      ) as HTMLButtonElement | null,
+    `Unable to find header title button for "${title}".`,
+  );
+}
+
+async function waitForHeaderTitleInput(): Promise<HTMLInputElement> {
+  return waitForElement(
+    () => document.querySelector<HTMLInputElement>("header input"),
+    "Unable to find header rename input.",
+  );
+}
+
+async function waitForSidebarTitleButton(title: string): Promise<HTMLButtonElement> {
+  return waitForElement(
+    () => {
+      const sidebar = document.querySelector<HTMLElement>("[data-slot='sidebar']");
+      if (!sidebar) {
+        return null;
+      }
+      return (
+        Array.from(sidebar.querySelectorAll("button")).find(
+          (button) => button.getAttribute("title") === title,
+        ) as HTMLButtonElement | null
+      );
+    },
+    `Unable to find sidebar title button for "${title}".`,
+  );
+}
+
+async function waitForSidebarTitleInput(): Promise<HTMLInputElement> {
+  return waitForElement(
+    () => document.querySelector<HTMLElement>("[data-slot='sidebar'] input") as HTMLInputElement | null,
+    "Unable to find sidebar rename input.",
+  );
+}
+
+function setInputValue(input: HTMLInputElement, value: string): void {
+  const valueSetter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  if (!valueSetter) {
+    throw new Error("Unable to resolve HTMLInputElement.value setter.");
+  }
+  valueSetter.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+async function waitForThreadRenameRequest(
+  threadId: ThreadId,
+  title: string,
+): Promise<Record<string, unknown>> {
+  let requestMatch: Record<string, unknown> | undefined;
+  await vi.waitFor(
+    () => {
+      requestMatch = wsRequests.find((request) => {
+        if (request._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) {
+          return false;
+        }
+        if (typeof request.command !== "object" || request.command === null) {
+          return false;
+        }
+        const command = request.command as Record<string, unknown>;
+        return (
+          command.type === "thread.meta.update" &&
+          command.threadId === threadId &&
+          command.title === title
+        );
+      }) as Record<string, unknown> | undefined;
+      expect(requestMatch).toBeTruthy();
+    },
+    {
+      timeout: 8_000,
+      interval: 16,
+    },
+  );
+  if (!requestMatch) {
+    throw new Error(`Expected rename request for thread "${threadId}" to "${title}".`);
+  }
+  return requestMatch;
 }
 
 async function waitForImagesToLoad(scope: ParentNode): Promise<void> {
@@ -798,6 +911,147 @@ describe("ChatView timeline estimator parity (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("renames the active thread from the header on double click", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-target-header-rename" as MessageId,
+        targetText: "header rename target",
+      }),
+    });
+
+    try {
+      const headerTitleButton = await waitForHeaderTitleButton("Browser test thread");
+      headerTitleButton.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+
+      const headerInput = await waitForHeaderTitleInput();
+      expect(document.querySelector("header")?.textContent).toContain("Project");
+
+      setInputValue(headerInput, "Header renamed");
+      headerInput.blur();
+
+      await waitForThreadRenameRequest(THREAD_ID, "Header renamed");
+      await vi.waitFor(
+        () => {
+          expect(document.querySelector("header input")).toBeNull();
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("cancels header rename on Escape", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-target-header-cancel" as MessageId,
+        targetText: "header cancel target",
+      }),
+    });
+
+    try {
+      const headerTitleButton = await waitForHeaderTitleButton("Browser test thread");
+      headerTitleButton.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+
+      const headerInput = await waitForHeaderTitleInput();
+      setInputValue(headerInput, "Should not persist");
+      headerInput.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(document.querySelector("header input")).toBeNull();
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(
+        wsRequests.some((request) => {
+          if (request._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return false;
+          }
+          if (typeof request.command !== "object" || request.command === null) {
+            return false;
+          }
+          return (request.command as Record<string, unknown>).type === "thread.meta.update";
+        }),
+      ).toBe(false);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("navigates on single click and renames from the sidebar title on double click", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithSecondaryThread(),
+    });
+
+    try {
+      const sidebarTitleButton = await waitForSidebarTitleButton("Secondary thread");
+      sidebarTitleButton.click();
+
+      await waitForHeaderTitleButton("Secondary thread");
+
+      const refreshedSidebarTitleButton = await waitForSidebarTitleButton("Secondary thread");
+      refreshedSidebarTitleButton.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+
+      const sidebarInput = await waitForSidebarTitleInput();
+      setInputValue(sidebarInput, "Sidebar renamed");
+      sidebarInput.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+
+      await waitForThreadRenameRequest("thread-secondary" as ThreadId, "Sidebar renamed");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("does not enter header rename mode for local draft threads", async () => {
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [THREAD_ID]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: {
+        [PROJECT_ID]: THREAD_ID,
+      },
+    });
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+    });
+
+    try {
+      const headerTitleButton = await waitForHeaderTitleButton("New thread");
+      headerTitleButton.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      await waitForLayout();
+
+      expect(document.querySelector("header input")).toBeNull();
     } finally {
       await mounted.cleanup();
     }

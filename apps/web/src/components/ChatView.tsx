@@ -222,6 +222,7 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import { clamp } from "effect/Number";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 import { estimateTimelineMessageHeight } from "./timelineHeight";
+import { commitThreadRename } from "~/lib/threadRename";
 
 function formatMessageMeta(createdAt: string, duration: string | null): string {
   if (!duration) return formatTimestamp(createdAt);
@@ -3452,6 +3453,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           activeThreadId={activeThread.id}
           activeThreadTitle={activeThread.title}
           activeProjectName={activeProject?.name}
+          canRenameThread={isServerThread}
           isGitRepo={isGitRepo}
           openInCwd={activeThread.worktreePath ?? activeProject?.cwd ?? null}
           activeProjectScripts={activeProject?.scripts}
@@ -4099,6 +4101,7 @@ interface ChatHeaderProps {
   activeThreadId: ThreadId;
   activeThreadTitle: string;
   activeProjectName: string | undefined;
+  canRenameThread: boolean;
   isGitRepo: boolean;
   openInCwd: string | null;
   activeProjectScripts: ProjectScript[] | undefined;
@@ -4119,6 +4122,7 @@ const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   activeThreadTitle,
   activeProjectName,
+  canRenameThread,
   isGitRepo,
   openInCwd,
   activeProjectScripts,
@@ -4134,16 +4138,106 @@ const ChatHeader = memo(function ChatHeader({
   onDeleteProjectScript,
   onToggleDiff,
 }: ChatHeaderProps) {
+  const [isRenamingTitle, setIsRenamingTitle] = useState(false);
+  const [renamingTitle, setRenamingTitle] = useState(activeThreadTitle);
+  const renamingInputRef = useRef<HTMLInputElement | null>(null);
+  const renameCommittedRef = useRef(false);
+
+  useEffect(() => {
+    setIsRenamingTitle(false);
+    renamingInputRef.current = null;
+    renameCommittedRef.current = false;
+  }, [activeThreadId]);
+
+  useEffect(() => {
+    if (!isRenamingTitle) {
+      setRenamingTitle(activeThreadTitle);
+    }
+  }, [activeThreadTitle, isRenamingTitle]);
+
+  useEffect(() => {
+    if (!canRenameThread) {
+      setIsRenamingTitle(false);
+      renamingInputRef.current = null;
+      renameCommittedRef.current = false;
+    }
+  }, [canRenameThread]);
+
+  const finishRename = useCallback(() => {
+    setIsRenamingTitle(false);
+    renamingInputRef.current = null;
+    renameCommittedRef.current = false;
+  }, []);
+
+  const cancelRename = useCallback(() => {
+    setRenamingTitle(activeThreadTitle);
+    finishRename();
+  }, [activeThreadTitle, finishRename]);
+
+  const startRename = useCallback(() => {
+    if (!canRenameThread) {
+      return;
+    }
+    renameCommittedRef.current = false;
+    setRenamingTitle(activeThreadTitle);
+    setIsRenamingTitle(true);
+  }, [activeThreadTitle, canRenameThread]);
+
+  const handleCommitRename = useCallback(async () => {
+    await commitThreadRename({
+      threadId: activeThreadId,
+      nextTitle: renamingTitle,
+      originalTitle: activeThreadTitle,
+    });
+    finishRename();
+  }, [activeThreadId, activeThreadTitle, finishRename, renamingTitle]);
+
   return (
     <div className="flex min-w-0 flex-1 items-center gap-2">
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
         <SidebarTrigger className="size-7 shrink-0 md:hidden" />
-        <h2
-          className="min-w-0 shrink truncate text-sm font-medium text-foreground"
-          title={activeThreadTitle}
-        >
-          {activeThreadTitle}
-        </h2>
+        {isRenamingTitle ? (
+          <input
+            ref={(element) => {
+              if (element && renamingInputRef.current !== element) {
+                renamingInputRef.current = element;
+                element.focus();
+                element.select();
+              }
+            }}
+            className="min-w-0 max-w-full shrink rounded border border-ring bg-transparent px-1 py-0.5 text-sm font-medium text-foreground outline-none"
+            value={renamingTitle}
+            onChange={(event) => setRenamingTitle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                renameCommittedRef.current = true;
+                void handleCommitRename();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                renameCommittedRef.current = true;
+                cancelRename();
+              }
+            }}
+            onBlur={() => {
+              if (!renameCommittedRef.current) {
+                void handleCommitRename();
+              }
+            }}
+          />
+        ) : (
+          <button
+            type="button"
+            className={cn(
+              "min-w-0 shrink overflow-hidden bg-transparent p-0 text-ellipsis whitespace-nowrap text-left text-sm font-medium text-foreground outline-hidden [-webkit-app-region:no-drag]",
+              canRenameThread ? "cursor-text" : "cursor-default",
+            )}
+            title={activeThreadTitle}
+            onDoubleClick={startRename}
+          >
+            {activeThreadTitle}
+          </button>
+        )}
         {activeProjectName && (
           <Badge variant="outline" className="max-w-28 shrink-0 truncate">
             {activeProjectName}
